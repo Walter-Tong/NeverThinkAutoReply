@@ -1,5 +1,6 @@
 from openai import OpenAI
 import os
+import requests
 
 from src.configs import configs, APP_ROOT_PATH
 from src.utils.logger import get_logger
@@ -11,18 +12,25 @@ class GPT:
     def __init__(self):
         logger.info("初始化 GPT 類")
         api_key = configs["Keys"].get("openai")
-        if not api_key:
-            logger.error("找不到 OpenAI API key")
-            raise ValueError("OpenAI API key not found in config")
 
         self.model = configs["General"].get("gpt_model", "gpt-4o-mini")
         logger.info(f"使用模型: {self.model}")
 
         try:
-            self.client = OpenAI(api_key=api_key)
+            self.base_url = configs["General"].get("base_url", "")
+
+            if len(self.base_url) <= 0:
+                self.client = OpenAI(api_key=api_key)
+            else:
+                self.isOpenAI = False
+                logger.info("Using url " + self.base_url)
+            
             logger.info("OpenAI 客戶端初始化成功")
         except Exception as e:
             logger.error(f"OpenAI 客戶端初始化失敗: {str(e)}", exc_info=True)
+            if not api_key:
+                logger.error("找不到 OpenAI API key")
+                raise ValueError("OpenAI API key not found in config")
             raise
 
     @staticmethod
@@ -58,28 +66,56 @@ class GPT:
         logger.info(f"開始生成回應 (方法: {method}, 最大token: {max_tokens}, 溫度: {temperature})")
         logger.debug(f"輸入文本: {prompt[:100]}...")
 
-        try:
-            system_prompt = self._prompt_loader(method)
-            logger.debug(f"系統提示詞: {system_prompt[:100]}...")
+        system_prompt = self._prompt_loader(method)
+        logger.debug(f"系統提示詞: {system_prompt[:100]}...")
 
-            logger.debug("發送 API 請求到 OpenAI")
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
+        if self.isOpenAI:
+            try:
+                logger.debug("發送 API 請求到 OpenAI")
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=max_tokens,
+                    temperature=temperature
+                )
+
+                result = response.choices[0].message.content.strip()
+                logger.info("成功獲得 API 回應")
+                logger.debug(f"生成的回應: {result[:100]}...")
+            
+            except Exception as e:
+                raise RuntimeError(f"API 請求失敗: {str(e)}")
+            
+        else:
+            headers = {"Content-Type": "application/json"}
+            payload = {
+                "model": self.model,
+                "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=max_tokens,
-                temperature=temperature
-            )
+                "max_tokens":max_tokens,
+                "temperature":temperature
+            }
 
-            result = response.choices[0].message.content.strip()
-            logger.info("成功獲得 API 回應")
-            logger.debug(f"生成的回應: {result[:100]}...")
-            return result
+            logger.debug("Send API request to non OpenAI api")
+            try:
+                response = requests.post(self.base_url + "/v1/chat/completions", headers=headers, json=payload)
+                response.raise_for_status()  # Check for HTTP errors
 
-        except Exception as e:
-            raise RuntimeError(f"API 請求失敗: {str(e)}")
+                # Parse JSON response
+                result = response.json()["choices"][0]["message"]["content"]
+
+                logger.info("Got API reponse")
+        
+                logger.debug(f"Generated reponse: {result[:100]}...")
+            except Exception as e:
+                raise RuntimeError(f"Call non OpenAI api fall {str(e)}")
+        
+        return result
 
 
 if __name__ == '__main__':
